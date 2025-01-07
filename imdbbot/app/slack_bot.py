@@ -1,97 +1,107 @@
-from slack_bolt import App
+from slack_bolt import App, BoltRequest
+from slack_bolt.adapter.starlette.handler import to_bolt_request
+
 from fastapi import Body, FastAPI
 from fastapi import Request as FastAPIRequest
 
-from typing import Dict, Any
+from typing import Dict, Any, List
 from dbos import DBOS, Queue, SetWorkflowID
 import os
 import datetime
 
-from app.movie_db import MovieDatabase
-from app.sentiment import SentimentModel
-import uuid
+from imdbbot.schemas.movies import MovieDatabase
+from imdbbot.app.sentiment import SentimentModel
 
 app = FastAPI()
 
-# Initialize Slack app
 slack_app = App(
     token=os.environ.get("SLACK_BOT_TOKEN"),
     signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
     logger=DBOS.logger
 )
 
-# Queue for processing feedback
 feedback_queue = Queue("movie_feedback_queue", limiter={"limit": 300, "period": 60}, concurrency=1)
 movie_recommendation_queue = Queue("movie_recommendation_queue", limiter={"limit": 300, "period": 60}, concurrency=1)
 model_training_queue = Queue("model_training_queue", limiter={"limit": 10, "period": 600}, concurrency=1)
+event_processing_queue = Queue("slack_event_queue", limiter={"limit": 300, "period": 60}, concurrency=1)
 
-# Initialize services
 sentiment_model = SentimentModel()
-
-# Create a single instance of MovieDatabase
 movie_db = None
 
-def get_movie_db():
-    """Get or create MovieDatabase instance"""
-    global movie_db
-    if movie_db is None:
-        movie_db = MovieDatabase()
-    return movie_db
-
-# Add user state tracking
-USER_STATES = {}  # Stores the current state and context for each user
+USER_STATES = {}
 class UserState:
     INITIAL = "initial"
     SELECTING_MOVIE = "selecting_movie"
     RATING_MOVIE = "rating_movie"
 
-# @app.post("/")
-# def slack_challenge(request: FastAPIRequest, body: Dict[str, Any] = Body(...)):  # type: ignore
-#     if "challenge" in body:
-#         # Respond to the Slack challenge request
-#         DBOS.logger.info("Received challenge")
-#         return {"challenge": body["challenge"]}
-#     # Dispatch other incoming requests to the Slack Bolt app
-#     return slackapp.dispatch(to_bolt_request(request, request._body))
-
 @app.post("/slack/events")
-@DBOS.workflow()
-async def handle_slack_event(request: FastAPIRequest, body: Dict[str, Any] = Body(...)):
-    """Handle incoming Slack events"""
+def slack_events(request: FastAPIRequest, body: Dict[str, Any] = Body(...)):
     if "challenge" in body:
+        DBOS.logger.info("Received challenge")
         return {"challenge": body["challenge"]}
+    return slack_app.dispatch(to_bolt_request(request, request._body))
 
-    event = body.get("event", {})
-    if event.get("type") == "message":
-        # Use event_id as idempotency key
-        event_id = body.get("event_id", str(uuid.uuid4()))
+# @slack_app.message()
+# def handle_message(request: BoltRequest) -> None:
+#     DBOS.logger.info(f"Received message: {request.body}")
+#     event_id = request.body["event_id"]
+
+#     try:
+#         with SetWorkflowID(event_id):
+#             handle = event_processing_queue.enqueue(
+#                 message_workflow,
+#                 request.body["event"]
+#             )
+#             handle.get_result()
+#     except Exception as e:
+#         DBOS.logger.error(f"Error processing message: {e}")
+@slack_app.message()
+def handle_message(request: BoltRequest) -> None:
+    DBOS.logger.info(f"Received message: {request.body}")
+    event_id = request.body["event_id"]
+
+    try:
         with SetWorkflowID(event_id):
-            result = await process_slack_message(event)
-            return {"ok": True, "result": result}
-    return {"ok": True}
+            message_workflow(request.body["event"])
+            return {"ok": True}
+    except Exception as e:
+        DBOS.logger.error(f"Error processing message: {e}")
+        return {"ok": False}
+
+@DBOS.workflow()
+def message_workflow(message: Dict[str, Any]) -> None:
+    DBOS.logger.info("Initializing movie database...")
+    initialize_movie_db()
+    DBOS.logger.info("Processing Slack message...")
+    process_slack_message(message)
+
+@DBOS.transaction()
+def initialize_movie_db():
+    """Get or create MovieDatabase instance"""
+    MovieDatabase.initialize_database(DBOS.sql_session, "robertveloso/movie-sentiment")
+
 
 @DBOS.step()
-async def process_slack_message(event: Dict[str, Any]) -> Dict[str, Any]:
+def process_slack_message(event: Dict[str, Any]):
     """Process incoming Slack message"""
     user = event["user"]
     text = event["text"]
     channel = event["channel"]
 
-    # Initialize user state if not exists
+    if event.get("bot_id") or event.get("subtype") == "bot_message":
+        return
+
     if user not in USER_STATES:
         USER_STATES[user] = {"state": UserState.INITIAL, "context": {}}
 
-    # Check if it's a greeting or process based on current state
     if is_greeting(text.lower()):
         USER_STATES[user] = {"state": UserState.SELECTING_MOVIE, "context": {}}
-        await send_trending_movies(channel)
-        return {"message": "Sent trending movies"}
+        send_trending_movies(channel)
     else:
         feedback_queue.enqueue(
             process_message,
             {"text": text, "user": user, "ts": event["ts"], "channel": channel}
         )
-        return {"message": "Queued message processing"}
 
 def is_greeting(text: str) -> bool:
     """Check if the message is a greeting"""
@@ -102,21 +112,35 @@ def is_greeting(text: str) -> bool:
 async def send_trending_movies(channel: str):
     """Send trending movies to the channel"""
     trending_movies = await _get_and_format_trending_movies()
-    await _send_slack_message(channel, trending_movies)
+    _send_slack_message(channel, trending_movies)
 
 @DBOS.step()
 async def _get_and_format_trending_movies() -> str:
     """Get and format trending movies message"""
-    trending_movies = get_movie_db().get_trending_movies(limit=10)
-    message = "Here are the top 10 trending movies:\n"
+    trending_movies = await _get_trending_movies()
+
+    if not trending_movies:
+        trending_movies = await _get_initial_recommendations()
+
+    message = "Here are the top 10 movies:\n"
     for idx, movie in enumerate(trending_movies, 1):
         message += f"{idx} - {movie['title']}\n"
     return message
 
+@DBOS.transaction()
+async def _get_trending_movies(limit: int = 10) -> List[Dict]:
+    """Database transaction to get trending movies"""
+    return MovieDatabase.get_trending_movies(DBOS.sql_session, limit=limit)
+
+@DBOS.transaction()
+async def _get_initial_recommendations(limit: int = 10) -> List[Dict]:
+    """Database transaction to get initial recommendations"""
+    return MovieDatabase.get_initial_recommendations(DBOS.sql_session, limit=limit)
+
 @DBOS.step()
-async def _send_slack_message(channel: str, message: str):
+def _send_slack_message(channel: str, message: str):
     """Send message to Slack channel"""
-    await slack_app.client.chat_postMessage(
+    slack_app.client.chat_postMessage(
         channel=channel,
         text=message
     )
@@ -134,12 +158,12 @@ async def process_message(message_data: Dict[str, Any]):
     elif user_state["state"] == UserState.RATING_MOVIE:
         await _handle_movie_rating(text, user, channel, user_state)
 
-@DBOS.step()
+@DBOS.transaction()
 async def _handle_movie_selection(text: str, user: str, channel: str, user_state: Dict):
     """Handle movie selection state"""
     if text.isdigit() and 1 <= int(text) <= 10:
         movie_number = int(text)
-        movie = get_movie_db().get_trending_movies(limit=10)[movie_number - 1]
+        movie = MovieDatabase.get_trending_movies(DBOS.sql_session, limit=10)[movie_number - 1]
         user_state["state"] = UserState.RATING_MOVIE
         user_state["context"]["current_movie"] = movie
         USER_STATES[user] = user_state
@@ -147,7 +171,7 @@ async def _handle_movie_selection(text: str, user: str, channel: str, user_state
     else:
         await send_invalid_selection_message(channel)
 
-@DBOS.step()
+@DBOS.transaction()
 async def _handle_movie_rating(text: str, user: str, channel: str, user_state: Dict):
     """Handle movie rating state"""
     if text.isdigit() and 1 <= int(text) <= 5:
@@ -170,10 +194,10 @@ async def send_movie_details(channel: str, movie: Dict, user: str):
     """Send movie details and prompt for rating"""
     await _check_and_send_movie_details(channel, movie, user)
 
-@DBOS.step()
+@DBOS.transaction()
 async def _check_and_send_movie_details(channel: str, movie: Dict, user: str):
     """Check if user watched movie and send appropriate message"""
-    watched = get_movie_db().has_user_watched(movie['id'], user)
+    watched = MovieDatabase.has_user_watched(DBOS.sql_session, movie['id'], user)
 
     message = f"*{movie['title']}*\n{movie['plot']}\n\n"
     if watched:
@@ -191,15 +215,12 @@ def store_user_reaction(user: str, text: str, sentiment: int, movie_id: str):
     """Store user reaction and potentially trigger recommendations"""
     _store_reaction_and_check(user, text, sentiment, movie_id)
 
-@DBOS.step()
+@DBOS.transaction()
 def _store_reaction_and_check(user: str, text: str, sentiment: int, movie_id: str):
     """Store reaction and check if recommendations should be triggered"""
-    # Store the reaction
-    get_movie_db().store_reaction(user, text, sentiment, movie_id)
+    MovieDatabase.store_reaction(DBOS.sql_session, user, text, sentiment, movie_id)
 
-    # Check if user has rated 5 movies
-    if get_movie_db().get_user_ratings_count(user) >= 5:
-        # Queue recommendation generation with idempotency
+    if MovieDatabase.get_user_ratings_count(DBOS.sql_session, user) >= 5:
         movie_recommendation_queue.enqueue(
             send_recommendations,
             {"user": user},
@@ -211,10 +232,10 @@ async def send_recommendations(data: Dict[str, str]):
     """Send movie recommendations to user"""
     await _generate_and_send_recommendations(data["user"])
 
-@DBOS.step()
+@DBOS.transaction()
 async def _generate_and_send_recommendations(user: str):
     """Generate and send personalized recommendations"""
-    recommendations = get_movie_db().get_recommendations(user)
+    recommendations = MovieDatabase.get_recommendations(DBOS.sql_session, user)
     message = "Based on your ratings, you might like:\n"
     for idx, movie in enumerate(recommendations, 1):
         message += f"{idx} - {movie['title']}\n"
@@ -236,10 +257,10 @@ def train_model():
     """Train the sentiment model"""
     _perform_model_training()
 
-@DBOS.step()
+@DBOS.transaction()
 def _perform_model_training():
     """Perform the actual model training"""
-    reactions = get_movie_db().get_all_reactions()
+    reactions = MovieDatabase.get_all_reactions(DBOS.sql_session)
     sentiment_model.train(reactions)
     sentiment_model.push_to_hub()
 
@@ -248,7 +269,7 @@ async def send_invalid_selection_message(channel: str):
     """Send invalid selection message"""
     await _send_invalid_selection(channel)
 
-@DBOS.step()
+@DBOS.transaction()
 async def _send_invalid_selection(channel: str):
     """Send message for invalid movie selection"""
     await slack_app.client.chat_postMessage(
@@ -264,7 +285,7 @@ async def send_invalid_rating_message(channel: str):
 @DBOS.step()
 async def _send_invalid_rating(channel: str):
     """Send message for invalid rating"""
-    await slack_app.client.chat_postMessage(
+    slack_app.client.chat_postMessage(
         channel=channel,
         text="Please provide a rating between 1 and 5 stars."
     )
@@ -277,8 +298,10 @@ async def send_rating_confirmation(channel: str, rating: int, movie_title: str):
 @DBOS.step()
 async def _send_confirmation_and_trending(channel: str, rating: int, movie_title: str):
     """Send confirmation message and trigger trending movies display"""
-    await slack_app.client.chat_postMessage(
+    trending_movies = await _get_and_format_trending_movies()
+    confirmation_message = f"Thanks for rating '{movie_title}' with {rating} stars!\n\n{trending_movies}"
+
+    slack_app.client.chat_postMessage(
         channel=channel,
-        text=f"Thanks for rating '{movie_title}' with {rating} stars! Here are the trending movies again:"
+        text=confirmation_message
     )
-    await send_trending_movies(channel)

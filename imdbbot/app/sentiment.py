@@ -9,7 +9,6 @@ class SentimentModel:
         self.hub = ModelHub(model_id=model_id)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Load model from Hub or local cache
         model_path = self.hub.get_latest_model()
         self.model = AutoModelForSequenceClassification.from_pretrained(model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)

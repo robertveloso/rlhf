@@ -3,7 +3,6 @@ import os
 from time import sleep
 
 def deploy_training():
-    # TensorDock SSH credentials (from their dashboard)
     hostname = os.environ.get('TENSORDOCK_HOST')
     username = os.environ.get('TENSORDOCK_USER', 'root')
     password = os.environ.get('TENSORDOCK_PASSWORD')
@@ -18,7 +17,6 @@ def deploy_training():
         ssh.connect(hostname, port, username, password)
         sftp = ssh.open_sftp()
 
-        # Upload training files
         print("Uploading training files...")
         files_to_upload = [
             ('imdbbot/training/base/train_model.py', '/home/user/train_model.py'),

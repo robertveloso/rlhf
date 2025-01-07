@@ -12,10 +12,10 @@ database:
   password: ${PGPASSWORD}
   app_db_name: imdbbot
   migrate:
-    - python3 migrations/migrate.py
+    - alembic upgrade head
 telemetry:
   logs:
-    logLevel: INFO
+    logLevel: DEBUG
 env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}
   SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN}

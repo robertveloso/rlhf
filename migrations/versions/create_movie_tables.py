@@ -1,9 +1,9 @@
 """
 Initialize movie database tables.
 
-Revision ID: [your_revision_id]
+Revision ID: 0001
 Revises:
-Create Date: [current_date_time]
+Create Date: 2025-01-07
 """
 
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision: str = "[your_revision_id]"
+revision: str = "0001"
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
