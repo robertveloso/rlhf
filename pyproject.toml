@@ -1,0 +1,39 @@
+[project]
+name = "imdbbot"
+version = "0.1.0"
+description = "A Slackbot for IMDB using SFT, RLHF and DBOS"
+authors = [
+    {name = "ROBERT VELOSO", email = "robert.veloso@icloud.com"},
+]
+dependencies = [
+    "llama-index>=0.10.67.post1",
+    "slack-bolt>=1.20.0",
+    "fastapi[standard]>=0.112.1",
+    "llama-index-vector-stores-postgres>=0.1.14",
+    "dbos>=0.10.0a2",
+]
+requires-python = ">=3.9"
+readme = "README.md"
+license = {text = "AGPL-3.0"}
+
+
+[tool.pdm]
+distribution = false
+
+[tool.pdm.dev-dependencies]
+dev = [
+    "mypy>=1.11.1",
+    "black>=24.8.0",
+    "isort>=5.13.2",
+]
+
+[tool.black]
+line-length = 120
+
+[tool.isort]
+profile = "black"
+filter_files = true
+atomic = true
+
+[tool.mypy]
+strict = true

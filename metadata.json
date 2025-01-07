@@ -1,0 +1,35 @@
+{
+    "display_information": {
+        "name": "IMDB Bot",
+        "description": "A IMDB Bot for rating and finding movies",
+        "background_color": "#004492"
+    },
+    "features": {
+        "bot_user": {
+            "display_name": "IMDB Bot",
+            "always_online": true
+        }
+    },
+    "oauth_config": {
+        "scopes": {
+            "bot": [
+                "channels:history",
+                "channels:join",
+                "channels:read",
+                "chat:write",
+                "users:read"
+            ]
+        }
+    },
+    "settings": {
+        "event_subscriptions": {
+            "request_url": "https://localhost",
+            "bot_events": [
+                "message.channels"
+            ]
+        },
+        "org_deploy_enabled": false,
+        "socket_mode_enabled": false,
+        "token_rotation_enabled": false
+    }
+}
